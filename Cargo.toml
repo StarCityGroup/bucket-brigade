@@ -1,0 +1,21 @@
+[package]
+name = "s3-migration-manager"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0"
+aws-config = { version = "1.5.0", features = ["behavior-version-latest"] }
+aws-sdk-s3 = { version = "1.38.0", features = ["behavior-version-latest"] }
+chrono = { version = "0.4", features = ["serde"] }
+crossterm = "0.27"
+directories = "5.0"
+futures = "0.3"
+ratatui = "0.27"
+regex = "1.10"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+tokio = { version = "1.37", features = ["macros", "rt-multi-thread", "signal"] }
+urlencoding = "2.1"
+uuid = { version = "1.8", features = ["serde", "v4"] }
