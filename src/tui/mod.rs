@@ -751,7 +751,15 @@ async fn refresh_selected_object(app: &mut App, s3: &S3Service) -> Result<()> {
         app.filtered_objects = app
             .objects
             .iter()
-            .filter(|&obj| mask.matches(&obj.key))
+            .filter(|&obj| {
+                let key_matches = mask.matches(&obj.key);
+                let storage_matches = mask
+                    .storage_class_filter
+                    .as_ref()
+                    .map(|filter| &obj.storage_class == filter)
+                    .unwrap_or(true);
+                key_matches && storage_matches
+            })
             .cloned()
             .collect();
     }

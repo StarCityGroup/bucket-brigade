@@ -257,7 +257,15 @@ impl App {
             self.filtered_objects = self
                 .objects
                 .iter()
-                .filter(|&obj| mask.matches(&obj.key))
+                .filter(|&obj| {
+                    let key_matches = mask.matches(&obj.key);
+                    let storage_matches = mask
+                        .storage_class_filter
+                        .as_ref()
+                        .map(|filter| &obj.storage_class == filter)
+                        .unwrap_or(true);
+                    key_matches && storage_matches
+                })
                 .cloned()
                 .collect();
         }
