@@ -21,9 +21,8 @@ use crate::app::{ActivePane, App, AppMode, MaskEditorField, PendingAction, Stora
 use crate::aws::S3Service;
 use crate::mask::ObjectMask;
 use crate::models::{RestoreState, StorageClassTier};
-use crate::policy::{MigrationPolicy, PolicyStore};
 
-pub async fn run(app: &mut App, s3: &S3Service, policy_store: &mut PolicyStore) -> Result<()> {
+pub async fn run(app: &mut App, s3: &S3Service) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -47,7 +46,7 @@ pub async fn run(app: &mut App, s3: &S3Service, policy_store: &mut PolicyStore) 
         }
     }
 
-    let result = event_loop(&mut terminal, app, s3, policy_store).await;
+    let result = event_loop(&mut terminal, app, s3).await;
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
@@ -58,7 +57,6 @@ async fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     app: &mut App,
     s3: &S3Service,
-    policy_store: &mut PolicyStore,
 ) -> Result<()> {
     let mut last_refresh = std::time::Instant::now();
     let refresh_interval = Duration::from_secs(30);
@@ -97,7 +95,7 @@ async fn event_loop(
         if event::poll(Duration::from_millis(200))? {
             match event::read()? {
                 Event::Key(key) => {
-                    if handle_key_event(key, app, s3, policy_store).await? {
+                    if handle_key_event(key, app, s3).await? {
                         break;
                     }
                 }
@@ -113,7 +111,6 @@ async fn handle_key_event(
     key: KeyEvent,
     app: &mut App,
     s3: &S3Service,
-    policy_store: &mut PolicyStore,
 ) -> Result<bool> {
     if key.kind != KeyEventKind::Press {
         return Ok(false);
@@ -152,7 +149,7 @@ async fn handle_key_event(
             return Ok(false);
         }
         AppMode::Confirming => {
-            handle_confirmation_keys(key, app, s3, policy_store).await?;
+            handle_confirmation_keys(key, app, s3).await?;
             return Ok(false);
         }
         AppMode::Browsing => {}
@@ -193,18 +190,6 @@ async fn handle_key_event(
         KeyCode::Enter => {
             if app.active_pane == ActivePane::Buckets {
                 load_objects_for_selection(app, s3).await?;
-            } else if app.active_pane == ActivePane::Templates {
-                apply_selected_policy(app)?;
-            }
-        }
-        KeyCode::Char('e') => {
-            if app.active_pane == ActivePane::Templates {
-                load_policy_mask_for_editing(app)?;
-            }
-        }
-        KeyCode::Char('d') => {
-            if app.active_pane == ActivePane::Templates {
-                initiate_policy_delete(app);
             }
         }
         KeyCode::Char('s') => {
@@ -215,13 +200,6 @@ async fn handle_key_event(
         KeyCode::Char('r') => {
             if let Err(err) = initiate_restore_flow(app) {
                 app.push_status(&format!("Cannot request restore: {err:#}"));
-            }
-        }
-        KeyCode::Char('p') => {
-            if let Err(err) = begin_storage_selection(app, StorageIntent::SavePolicy) {
-                app.push_status(&format!("Cannot save template: {err:#}"));
-            } else {
-                app.push_status("Select target storage class for template");
             }
         }
         KeyCode::Char('?') => {
@@ -255,7 +233,6 @@ async fn handle_confirmation_keys(
     key: KeyEvent,
     app: &mut App,
     s3: &S3Service,
-    policy_store: &mut PolicyStore,
 ) -> Result<()> {
     match key.code {
         KeyCode::Esc | KeyCode::Char('n') => {
@@ -273,12 +250,6 @@ async fn handle_confirmation_keys(
                     }
                     PendingAction::Restore { days } => {
                         execute_restore(app, s3, days).await?;
-                    }
-                    PendingAction::SavePolicy { target_class } => {
-                        save_policy(app, policy_store, target_class)?;
-                    }
-                    PendingAction::DeletePolicy { policy_index } => {
-                        delete_policy(app, policy_store, policy_index)?;
                     }
                 }
             }
@@ -400,13 +371,6 @@ fn handle_storage_class_selector(key: KeyEvent, app: &mut App) {
                             selected.label()
                         ));
                     }
-                    StorageIntent::SavePolicy => {
-                        app.pending_action = Some(PendingAction::SavePolicy {
-                            target_class: selected.clone(),
-                        });
-                        app.set_mode(AppMode::Confirming);
-                        app.push_status("Confirm saving template");
-                    }
                 }
             }
         }
@@ -422,11 +386,6 @@ fn begin_storage_selection(app: &mut App, intent: StorageIntent) -> Result<()> {
             }
             if target_count(app) == 0 {
                 anyhow::bail!("Select at least one object (mask or row)");
-            }
-        }
-        StorageIntent::SavePolicy => {
-            if app.active_mask.is_none() {
-                anyhow::bail!("Apply a mask before saving a template");
             }
         }
     }
@@ -549,33 +508,34 @@ async fn execute_restore(app: &mut App, s3: &S3Service, days: i32) -> Result<()>
 
     app.push_status(&format!("Requesting restore for {} objects...", keys_to_restore.len()));
 
+    let mut restored_keys = Vec::new();
     for key in keys_to_restore {
         match s3.request_restore(&bucket, &key, days).await {
-            Ok(_) => app.push_status(&format!("✓ Restore requested for {key}")),
+            Ok(_) => {
+                app.push_status(&format!("✓ Restore requested for {key}"));
+                restored_keys.push(key);
+            }
             Err(err) => {
                 let detail = describe_restore_error(&err);
                 app.push_status(&format!("✗ Restore failed for {key}: {detail}"));
             }
         }
     }
-    // Reload objects to show updated restore status
-    load_objects_for_selection(app, s3).await?;
-    Ok(())
-}
 
-fn save_policy(
-    app: &mut App,
-    store: &mut PolicyStore,
-    target_class: StorageClassTier,
-) -> Result<()> {
-    let mask = app
-        .active_mask
-        .clone()
-        .context("Apply a mask before saving template")?;
-    let policy = MigrationPolicy::new(mask, target_class, None);
-    store.add(policy.clone())?;
-    app.policies = store.policies.clone();
-    app.push_status("Template saved");
+    // Manually update restore status for successfully restored objects
+    // AWS doesn't immediately reflect the status change, so we update it in memory
+    for obj in app.objects.iter_mut() {
+        if restored_keys.contains(&obj.key) {
+            obj.restore_state = Some(crate::models::RestoreState::InProgress { expiry: None });
+        }
+    }
+
+    // Update filtered objects if a mask is active
+    if app.active_mask.is_some() {
+        let mask = app.active_mask.clone();
+        app.apply_mask(mask);
+    }
+
     Ok(())
 }
 
@@ -725,20 +685,6 @@ fn move_selection(app: &mut App, delta: isize) {
             }
             app.selected_object = idx as usize;
         }
-        ActivePane::Templates => {
-            if app.policies.is_empty() {
-                return;
-            }
-            let len = app.policies.len() as isize;
-            let mut idx = app.selected_policy as isize + delta;
-            if idx < 0 {
-                idx = 0;
-            }
-            if idx >= len {
-                idx = len - 1;
-            }
-            app.selected_policy = idx as usize;
-        }
         ActivePane::MaskEditor => {}
     }
 }
@@ -762,11 +708,6 @@ fn jump_selection(app: &mut App, start: bool) {
                 } else {
                     app.active_objects().len() - 1
                 };
-            }
-        }
-        ActivePane::Templates => {
-            if !app.policies.is_empty() {
-                app.selected_policy = if start { 0 } else { app.policies.len() - 1 };
             }
         }
         _ => {}
@@ -817,105 +758,6 @@ fn target_keys(app: &App) -> Vec<String> {
     }
 }
 
-fn apply_selected_policy(app: &mut App) -> Result<()> {
-    if app.policies.is_empty() {
-        anyhow::bail!("No templates available");
-    }
-
-    if app.selected_bucket_name().is_none() {
-        app.push_status("Select a bucket first to apply this template");
-        return Ok(());
-    }
-
-    let policy = app
-        .policies
-        .get(app.selected_policy)
-        .context("Selected template index out of bounds")?
-        .clone();
-
-    // Apply the mask
-    app.apply_mask(Some(policy.mask.clone()));
-
-    // Check if any objects need restore before transition
-    let needs_restore = app.any_targets_need_restoration();
-
-    if needs_restore {
-        // Warn user and suggest restore first
-        app.push_status(&format!(
-            "⚠ Some objects in mask '{}' require restore before transition. Press 'r' to restore them first.",
-            policy.mask.name
-        ));
-        return Ok(());
-    }
-
-    // Set up the pending action for storage class transition
-    app.pending_action = Some(PendingAction::Transition {
-        target_class: policy.target_storage_class.clone(),
-    });
-    app.set_mode(AppMode::Confirming);
-    app.push_status(&format!(
-        "Template '{}' applied. Confirm to transition {} objects to {}",
-        policy.mask.name,
-        app.filtered_objects.len(),
-        policy.target_storage_class.label()
-    ));
-    Ok(())
-}
-
-fn load_policy_mask_for_editing(app: &mut App) -> Result<()> {
-    if app.policies.is_empty() {
-        anyhow::bail!("No templates available");
-    }
-    let policy = app
-        .policies
-        .get(app.selected_policy)
-        .context("Selected template index out of bounds")?
-        .clone();
-
-    // Load the mask into the draft for editing
-    app.mask_draft.name = policy.mask.name.clone();
-    app.mask_draft.pattern = policy.mask.pattern.clone();
-    app.mask_draft.kind = policy.mask.kind.clone();
-    app.mask_draft.case_sensitive = policy.mask.case_sensitive;
-
-    // Enter mask editing mode
-    app.set_mode(AppMode::EditingMask);
-    app.focus_mask_field(MaskEditorField::Name);
-    app.push_status(&format!("Loaded mask '{}' for editing", policy.mask.name));
-    Ok(())
-}
-
-fn initiate_policy_delete(app: &mut App) {
-    if app.policies.is_empty() {
-        app.push_status("No templates to delete");
-        return;
-    }
-    if app.selected_policy >= app.policies.len() {
-        app.push_status("Invalid template selection");
-        return;
-    }
-    app.pending_action = Some(PendingAction::DeletePolicy {
-        policy_index: app.selected_policy,
-    });
-    app.set_mode(AppMode::Confirming);
-    app.push_status("Confirm template deletion");
-}
-
-fn delete_policy(
-    app: &mut App,
-    store: &mut PolicyStore,
-    policy_index: usize,
-) -> Result<()> {
-    store.remove(policy_index)?;
-    app.policies = store.policies.clone();
-    // Adjust selected_policy if necessary
-    if app.selected_policy >= app.policies.len() && !app.policies.is_empty() {
-        app.selected_policy = app.policies.len() - 1;
-    }
-    app.push_status("Template deleted");
-    Ok(())
-}
-
 fn draw(frame: &mut ratatui::Frame, app: &App) {
     let size = frame.size();
 
@@ -929,14 +771,8 @@ fn draw(frame: &mut ratatui::Frame, app: &App) {
         ])
         .split(size);
 
-    // Horizontal split: main content (left) and policies (right)
-    let horizontal = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(75), Constraint::Percentage(25)])
-        .split(vertical[0]);
-
-    // Left side: bucket selector, mask, objects, object detail
-    let left_panel = Layout::default()
+    // Main content panel: bucket selector, mask, objects, object detail
+    let main_panel = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // Bucket selector (compact)
@@ -944,13 +780,12 @@ fn draw(frame: &mut ratatui::Frame, app: &App) {
             Constraint::Min(10),   // Objects list
             Constraint::Length(8), // Selected object detail
         ])
-        .split(horizontal[0]);
+        .split(vertical[0]);
 
-    draw_bucket_selector(frame, left_panel[0], app);
-    draw_mask_panel(frame, left_panel[1], app);
-    draw_objects(frame, left_panel[2], app);
-    draw_object_detail(frame, left_panel[3], app);
-    draw_policy_panel(frame, horizontal[1], app);
+    draw_bucket_selector(frame, main_panel[0], app);
+    draw_mask_panel(frame, main_panel[1], app);
+    draw_objects(frame, main_panel[2], app);
+    draw_object_detail(frame, main_panel[3], app);
     draw_status(frame, vertical[1], app);
     draw_command_bar(frame, vertical[2]);
 
@@ -1049,8 +884,8 @@ fn draw_objects(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         .style(Style::default().bg(Color::Black));
 
     // Calculate available width for the key column
-    // 2 (marker) + 1 (space) + 13 (size) + 1 (space) + 20 (storage) + 1 (space) + 4 (restore) + 2 (borders) = 44
-    let fixed_width = 44;
+    // 2 (marker) + 1 (space) + 13 (size) + 1 (space) + 20 (storage) + 1 (space) + 13 (restore) + 2 (borders) = 53
+    let fixed_width = 53;
     let key_width = area.width.saturating_sub(fixed_width).max(20) as usize;
 
     let items: Vec<ListItem> = objects
@@ -1211,63 +1046,6 @@ fn draw_mask_panel(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     frame.render_widget(para, area);
 }
 
-fn draw_policy_panel(frame: &mut ratatui::Frame, area: Rect, app: &App) {
-    let title_style = Style::default()
-        .fg(Color::LightGreen)
-        .add_modifier(Modifier::BOLD);
-    let block = Block::default()
-        .title(Span::styled(
-            "Templates – Enter apply, e edit, d delete",
-            title_style,
-        ))
-        .borders(Borders::ALL)
-        .border_style(highlight_border(app.active_pane == ActivePane::Templates))
-        .style(Style::default().bg(Color::Black));
-    let lines: Vec<Line> = app
-        .policies
-        .iter()
-        .enumerate()
-        .map(|(idx, policy)| {
-            let is_selected = idx == app.selected_policy;
-            let marker = if is_selected { "►" } else { " " };
-            let marker_style = if is_selected {
-                Style::default()
-                    .fg(Color::LightYellow)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::DarkGray)
-            };
-
-            // Use different colors for different elements
-            let mask_style = if is_selected {
-                Style::default()
-                    .fg(Color::LightCyan)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::Cyan)
-            };
-
-            let storage_style = if is_selected {
-                Style::default()
-                    .fg(Color::LightYellow)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::Yellow)
-            };
-
-            Line::from(vec![
-                Span::styled(marker, marker_style),
-                Span::raw(" "),
-                Span::styled(&policy.mask.name, mask_style),
-                Span::raw(" → "),
-                Span::styled(policy.target_storage_class.label(), storage_style),
-            ])
-        })
-        .collect();
-    let para = Paragraph::new(lines).block(block).wrap(Wrap { trim: true });
-    frame.render_widget(para, area);
-}
-
 fn draw_status(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     let lines: Vec<Line> = app
         .status
@@ -1300,8 +1078,6 @@ fn draw_command_bar(frame: &mut ratatui::Frame, area: Rect) {
         Span::raw("ask "),
         Span::styled(" s ", key_style),
         Span::raw("torage "),
-        Span::styled(" p ", key_style),
-        Span::raw("template "),
         Span::styled(" r ", key_style),
         Span::raw("estore "),
         Span::styled(" i ", key_style),
@@ -1438,49 +1214,6 @@ fn draw_confirm_popup(frame: &mut ratatui::Frame, app: &App) {
                     Span::styled(format!("{} days", days), highlight_style),
                 ]));
             }
-            PendingAction::SavePolicy { target_class } => {
-                lines.push(Line::from(vec![Span::styled(
-                    "Save Migration Template",
-                    warn_style,
-                )]));
-                lines.push(Line::from(""));
-                if let Some(mask) = &app.active_mask {
-                    lines.push(Line::from(vec![
-                        Span::raw("  Mask:   "),
-                        Span::styled(&mask.name, highlight_style),
-                    ]));
-                }
-                lines.push(Line::from(vec![
-                    Span::raw("  Target: "),
-                    Span::styled(target_class.label(), highlight_style),
-                ]));
-            }
-            PendingAction::DeletePolicy { policy_index } => {
-                lines.push(Line::from(vec![Span::styled(
-                    "Delete Template",
-                    Style::default()
-                        .fg(Color::Red)
-                        .add_modifier(Modifier::BOLD),
-                )]));
-                lines.push(Line::from(""));
-                if let Some(policy) = app.policies.get(*policy_index) {
-                    lines.push(Line::from(vec![
-                        Span::raw("  Mask:   "),
-                        Span::styled(&policy.mask.name, highlight_style),
-                    ]));
-                    lines.push(Line::from(vec![
-                        Span::raw("  Target: "),
-                        Span::styled(policy.target_storage_class.label(), highlight_style),
-                    ]));
-                    lines.push(Line::from(""));
-                    lines.push(Line::from(vec![Span::styled(
-                        "This action cannot be undone!",
-                        Style::default()
-                            .fg(Color::Red)
-                            .add_modifier(Modifier::BOLD),
-                    )]));
-                }
-            }
         }
     }
 
@@ -1530,7 +1263,7 @@ fn draw_help_popup(frame: &mut ratatui::Frame) {
     let lines = vec![
         Line::from(vec![Span::styled("BASIC WORKFLOW", header_style)]),
         Line::from(
-            "1. Navigate with Tab/Shift+Tab to switch between panes (Buckets, Objects, Templates)",
+            "1. Navigate with Tab/Shift+Tab to switch between panes (Buckets, Objects)",
         ),
         Line::from("2. Select a bucket with arrows, press Enter to load its objects"),
         Line::from("3. Create a mask (press 'm') to filter objects by pattern"),
@@ -1547,7 +1280,7 @@ fn draw_help_popup(frame: &mut ratatui::Frame) {
         ]),
         Line::from(vec![
             Span::styled("Enter", key_style),
-            Span::raw(" - Load bucket objects (Buckets pane) or apply template (Templates pane)"),
+            Span::raw(" - Load bucket objects (Buckets pane)"),
         ]),
         Line::from(""),
         Line::from(vec![Span::styled("OBJECT FILTERING (MASKS)", header_style)]),
@@ -1579,28 +1312,6 @@ fn draw_help_popup(frame: &mut ratatui::Frame) {
         Line::from(vec![
             Span::styled("i", key_style),
             Span::raw(" - Inspect selected object (refreshes metadata via HeadObject)"),
-        ]),
-        Line::from(""),
-        Line::from(vec![Span::styled("TEMPLATES (SAVE & REUSE)", header_style)]),
-        Line::from(vec![
-            Span::styled("p", key_style),
-            Span::raw(" - Save current mask as a template (stores mask + bucket + target class)"),
-        ]),
-        Line::from("In Templates pane (use Tab to focus):"),
-        Line::from(vec![
-            Span::raw("   "),
-            Span::styled("Enter", key_style),
-            Span::raw(" - Apply selected template (applies mask + transitions to saved class)"),
-        ]),
-        Line::from(vec![
-            Span::raw("   "),
-            Span::styled("e", key_style),
-            Span::raw(" - Load template mask into editor for modification before applying"),
-        ]),
-        Line::from(vec![
-            Span::raw("   "),
-            Span::styled("d", key_style),
-            Span::raw(" - Delete selected template"),
         ]),
         Line::from(""),
         Line::from(vec![Span::styled("OTHER COMMANDS", header_style)]),

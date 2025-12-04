@@ -2,7 +2,6 @@ use std::collections::VecDeque;
 
 use crate::mask::{MaskKind, ObjectMask};
 use crate::models::{BucketInfo, ObjectInfo, StorageClassTier};
-use crate::policy::MigrationPolicy;
 
 const STATUS_LIMIT: usize = 20;
 
@@ -11,7 +10,6 @@ pub enum ActivePane {
     Buckets,
     Objects,
     MaskEditor,
-    Templates,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,7 +26,6 @@ pub enum AppMode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StorageIntent {
     Transition,
-    SavePolicy,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,12 +82,6 @@ pub enum PendingAction {
     Restore {
         days: i32,
     },
-    SavePolicy {
-        target_class: StorageClassTier,
-    },
-    DeletePolicy {
-        policy_index: usize,
-    },
 }
 
 pub struct App {
@@ -100,7 +91,6 @@ pub struct App {
     pub filtered_objects: Vec<ObjectInfo>,
     pub selected_bucket: usize,
     pub selected_object: usize,
-    pub selected_policy: usize,
     pub selected_region: Option<String>,
     pub available_regions: Vec<String>,
     pub status: VecDeque<String>,
@@ -108,7 +98,6 @@ pub struct App {
     pub mode: AppMode,
     pub mask_draft: MaskDraft,
     pub active_mask: Option<ObjectMask>,
-    pub policies: Vec<MigrationPolicy>,
     pub pending_action: Option<PendingAction>,
     pub storage_class_cursor: usize,
     pub storage_intent: StorageIntent,
@@ -122,7 +111,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(policies: Vec<MigrationPolicy>) -> Self {
+    pub fn new() -> Self {
         let available_regions = vec![
             "All Regions".to_string(),
             "us-east-1".to_string(),
@@ -148,7 +137,6 @@ impl App {
             filtered_objects: Vec::new(),
             selected_bucket: 0,
             selected_object: 0,
-            selected_policy: 0,
             selected_region: None,
             available_regions,
             status: VecDeque::with_capacity(STATUS_LIMIT),
@@ -156,7 +144,6 @@ impl App {
             mode: AppMode::Browsing,
             mask_draft: MaskDraft::default(),
             active_mask: None,
-            policies,
             pending_action: None,
             storage_class_cursor: 0,
             storage_intent: StorageIntent::Transition,
@@ -303,18 +290,16 @@ impl App {
     pub fn next_pane(&mut self) {
         self.active_pane = match self.active_pane {
             ActivePane::Buckets => ActivePane::Objects,
-            ActivePane::Objects => ActivePane::Templates,
-            ActivePane::MaskEditor => ActivePane::Templates,
-            ActivePane::Templates => ActivePane::Buckets,
+            ActivePane::Objects => ActivePane::Buckets,
+            ActivePane::MaskEditor => ActivePane::Buckets,
         };
     }
 
     pub fn previous_pane(&mut self) {
         self.active_pane = match self.active_pane {
-            ActivePane::Buckets => ActivePane::Templates,
+            ActivePane::Buckets => ActivePane::Objects,
             ActivePane::Objects => ActivePane::Buckets,
             ActivePane::MaskEditor => ActivePane::Buckets,
-            ActivePane::Templates => ActivePane::Objects,
         };
     }
 
