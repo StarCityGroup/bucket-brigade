@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use aws_sdk_s3::Client;
-use aws_sdk_s3::types::{MetadataDirective, RestoreRequest, RestoreStatus};
+use aws_sdk_s3::types::{MetadataDirective, RestoreRequest};
 use chrono::{DateTime, Utc};
 
 use crate::models::{BucketInfo, ObjectInfo, RestoreState, StorageClassTier};
@@ -110,12 +110,14 @@ impl S3Service {
         let mut objects = Vec::new();
         for object in response.contents() {
             if let Some(key) = object.key() {
+                // Note: ListObjectsV2 does not return restore status, it's always None
+                // We fetch it separately for Glacier objects after loading
                 objects.push(ObjectInfo {
                     key: key.to_string(),
                     size: object.size().unwrap_or_default(),
                     last_modified: object.last_modified().map(|dt| dt.to_string()),
                     storage_class: StorageClassTier::from(object.storage_class().cloned()),
-                    restore_state: parse_restore_status(object.restore_status()),
+                    restore_state: None, // Will be populated by batch_refresh_restore_status
                 });
             }
         }
@@ -129,7 +131,6 @@ impl S3Service {
         Ok((objects, next_token))
     }
 
-
     pub async fn refresh_object(&self, bucket: &str, key: &str) -> Result<ObjectInfo> {
         let head = self
             .client
@@ -138,6 +139,7 @@ impl S3Service {
             .key(key)
             .send()
             .await?;
+
         Ok(ObjectInfo {
             key: key.to_string(),
             size: head.content_length().unwrap_or_default(),
@@ -145,6 +147,52 @@ impl S3Service {
             storage_class: StorageClassTier::from(head.storage_class().cloned()),
             restore_state: parse_restore_state(head.restore()),
         })
+    }
+
+    /// Batch refresh restore status for Glacier objects
+    /// Returns a map of key -> restore_state
+    pub async fn batch_refresh_restore_status(
+        &self,
+        bucket: &str,
+        keys: &[String],
+    ) -> Vec<(String, Option<RestoreState>)> {
+        let mut results = Vec::new();
+
+        // Make concurrent HeadObject calls (but limit concurrency)
+        use futures::stream::{self, StreamExt};
+
+        let chunk_size = 10; // Process 10 at a time
+        let mut stream = stream::iter(keys)
+            .map(|key| {
+                let bucket = bucket.to_string();
+                let key = key.to_string();
+                async move {
+                    match self
+                        .client
+                        .head_object()
+                        .bucket(&bucket)
+                        .key(&key)
+                        .send()
+                        .await
+                    {
+                        Ok(head) => {
+                            let restore_state = parse_restore_state(head.restore());
+                            (key, restore_state)
+                        }
+                        Err(_) => {
+                            // If HeadObject fails, keep the status unknown
+                            (key, None)
+                        }
+                    }
+                }
+            })
+            .buffer_unordered(chunk_size);
+
+        while let Some(result) = stream.next().await {
+            results.push(result);
+        }
+
+        results
     }
 
     pub async fn transition_storage_class(
@@ -180,6 +228,7 @@ impl S3Service {
             .restore_request(restore_request)
             .send()
             .await?;
+
         Ok(())
     }
 }
@@ -203,19 +252,6 @@ fn parse_restore_state(raw: Option<&str>) -> Option<RestoreState> {
             RestoreState::Available
         } else {
             RestoreState::Expired
-        }
-    })
-}
-
-fn parse_restore_status(status: Option<&RestoreStatus>) -> Option<RestoreState> {
-    status.map(|s| {
-        let is_ongoing = s.is_restore_in_progress().unwrap_or(false);
-
-        if is_ongoing {
-            let expiry = s.restore_expiry_date().map(|dt| dt.to_string());
-            RestoreState::InProgress { expiry }
-        } else {
-            RestoreState::Available
         }
     })
 }

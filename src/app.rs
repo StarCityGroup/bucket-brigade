@@ -73,12 +73,8 @@ impl Default for MaskDraft {
 }
 
 pub enum PendingAction {
-    Transition {
-        target_class: StorageClassTier,
-    },
-    Restore {
-        days: i32,
-    },
+    Transition { target_class: StorageClassTier },
+    Restore { days: i32 },
 }
 
 pub struct App {
@@ -378,16 +374,20 @@ impl App {
             return 0;
         };
 
-        objects.iter().filter(|obj| {
-            matches!(
-                obj.storage_class,
-                StorageClassTier::GlacierFlexibleRetrieval | StorageClassTier::GlacierDeepArchive
-            ) && !matches!(
-                obj.restore_state,
-                Some(crate::models::RestoreState::Available)
-                    | Some(crate::models::RestoreState::InProgress { .. })
-            )
-        }).count()
+        objects
+            .iter()
+            .filter(|obj| {
+                matches!(
+                    obj.storage_class,
+                    StorageClassTier::GlacierFlexibleRetrieval
+                        | StorageClassTier::GlacierDeepArchive
+                ) && !matches!(
+                    obj.restore_state,
+                    Some(crate::models::RestoreState::Available)
+                        | Some(crate::models::RestoreState::InProgress { .. })
+                )
+            })
+            .count()
     }
 
     /// Get count of objects already being restored
@@ -400,11 +400,14 @@ impl App {
             return 0;
         };
 
-        objects.iter().filter(|obj| {
-            matches!(
-                obj.restore_state,
-                Some(crate::models::RestoreState::InProgress { .. })
-            )
-        }).count()
+        objects
+            .iter()
+            .filter(|obj| {
+                matches!(
+                    obj.restore_state,
+                    Some(crate::models::RestoreState::InProgress { .. })
+                )
+            })
+            .count()
     }
 }

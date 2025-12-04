@@ -38,7 +38,8 @@ pub async fn run(app: &mut App, s3: &S3Service) -> Result<()> {
             || err_msg.contains("UnrecognizedClientException")
             || err_msg.contains("InvalidAccessKeyId")
             || err_msg.contains("SignatureDoesNotMatch")
-            || err_msg.contains("NoCredentialsError") {
+            || err_msg.contains("NoCredentialsError")
+        {
             app.set_mode(AppMode::CredentialError);
             app.push_status(&format!("AWS credentials error: {err_msg}"));
         } else {
@@ -107,11 +108,7 @@ async fn event_loop(
     Ok(())
 }
 
-async fn handle_key_event(
-    key: KeyEvent,
-    app: &mut App,
-    s3: &S3Service,
-) -> Result<bool> {
+async fn handle_key_event(key: KeyEvent, app: &mut App, s3: &S3Service) -> Result<bool> {
     if key.kind != KeyEventKind::Press {
         return Ok(false);
     }
@@ -231,11 +228,7 @@ async fn handle_key_event(
     Ok(false)
 }
 
-async fn handle_confirmation_keys(
-    key: KeyEvent,
-    app: &mut App,
-    s3: &S3Service,
-) -> Result<()> {
+async fn handle_confirmation_keys(key: KeyEvent, app: &mut App, s3: &S3Service) -> Result<()> {
     match key.code {
         KeyCode::Esc | KeyCode::Char('n') => {
             app.pending_action = None;
@@ -245,9 +238,7 @@ async fn handle_confirmation_keys(
         KeyCode::Enter | KeyCode::Char('y') => {
             if let Some(action) = app.pending_action.take() {
                 match action {
-                    PendingAction::Transition {
-                        target_class,
-                    } => {
+                    PendingAction::Transition { target_class } => {
                         execute_transition(app, s3, target_class).await?;
                     }
                     PendingAction::Restore { days } => {
@@ -337,7 +328,9 @@ fn handle_mask_editor_keys(key: KeyEvent, app: &mut App) {
             MaskEditorField::Mode => app.cycle_mask_kind(),
             MaskEditorField::Case => app.toggle_mask_case(),
             MaskEditorField::Pattern => {
-                app.mask_draft.pattern.insert(app.mask_draft.cursor_pos, ' ');
+                app.mask_draft
+                    .pattern
+                    .insert(app.mask_draft.cursor_pos, ' ');
                 app.mask_draft.cursor_pos += 1;
             }
         },
@@ -423,7 +416,10 @@ fn initiate_restore_flow(app: &mut App) -> Result<()> {
 
     if need_restore == 0 {
         if already_restoring > 0 {
-            app.push_status(&format!("{} objects are already being restored", already_restoring));
+            app.push_status(&format!(
+                "{} objects are already being restored",
+                already_restoring
+            ));
         } else {
             app.push_status("No objects need restore (not Glacier or already restored)");
         }
@@ -439,7 +435,10 @@ fn initiate_restore_flow(app: &mut App) -> Result<()> {
             need_restore, already_restoring
         ));
     } else {
-        app.push_status(&format!("Confirm restore request for {} objects", need_restore));
+        app.push_status(&format!(
+            "Confirm restore request for {} objects",
+            need_restore
+        ));
     }
     Ok(())
 }
@@ -480,7 +479,10 @@ async fn execute_restore(app: &mut App, s3: &S3Service, days: i32) -> Result<()>
     // Get objects and filter to only those needing restore
     let all_keys = target_keys(app);
     let objects_map: std::collections::HashMap<_, _> = if app.active_mask.is_some() {
-        app.filtered_objects.iter().map(|o| (o.key.clone(), o)).collect()
+        app.filtered_objects
+            .iter()
+            .map(|o| (o.key.clone(), o))
+            .collect()
     } else {
         app.objects.iter().map(|o| (o.key.clone(), o)).collect()
     };
@@ -503,7 +505,7 @@ async fn execute_restore(app: &mut App, s3: &S3Service, days: i32) -> Result<()>
                     if matches!(
                         obj.storage_class,
                         crate::models::StorageClassTier::GlacierFlexibleRetrieval
-                        | crate::models::StorageClassTier::GlacierDeepArchive
+                            | crate::models::StorageClassTier::GlacierDeepArchive
                     ) {
                         keys_to_restore.push(key.clone());
                     }
@@ -513,10 +515,16 @@ async fn execute_restore(app: &mut App, s3: &S3Service, days: i32) -> Result<()>
     }
 
     if already_restoring > 0 {
-        app.push_status(&format!("Skipped {} objects already being restored", already_restoring));
+        app.push_status(&format!(
+            "Skipped {} objects already being restored",
+            already_restoring
+        ));
     }
     if already_available > 0 {
-        app.push_status(&format!("Skipped {} objects already restored", already_available));
+        app.push_status(&format!(
+            "Skipped {} objects already restored",
+            already_available
+        ));
     }
 
     if keys_to_restore.is_empty() {
@@ -524,7 +532,10 @@ async fn execute_restore(app: &mut App, s3: &S3Service, days: i32) -> Result<()>
         return Ok(());
     }
 
-    app.push_status(&format!("Requesting restore for {} objects...", keys_to_restore.len()));
+    app.push_status(&format!(
+        "Requesting restore for {} objects...",
+        keys_to_restore.len()
+    ));
 
     let mut restored_keys = Vec::new();
     for key in keys_to_restore {
@@ -620,6 +631,9 @@ async fn load_objects_for_selection(app: &mut App, s3: &S3Service) -> Result<()>
                 let loaded = app.objects.len();
                 let total = app.total_object_count.unwrap_or(loaded);
                 app.push_status(&format!("Loaded {} of {} objects", loaded, total));
+
+                // Fetch restore status for Glacier objects
+                refresh_glacier_restore_status(app, s3, &bucket).await;
             }
             Err(err) => {
                 app.push_status(&format!("Failed to load objects: {err:#}"));
@@ -656,6 +670,9 @@ async fn load_more_objects(app: &mut App, s3: &S3Service) -> Result<()> {
                 } else {
                     app.push_status(&format!("Loaded all {} objects", total));
                 }
+
+                // Fetch restore status for newly loaded Glacier objects
+                refresh_glacier_restore_status(app, s3, &bucket).await;
             }
             Err(err) => {
                 app.push_status(&format!("Failed to load more: {err:#}"));
@@ -665,6 +682,44 @@ async fn load_more_objects(app: &mut App, s3: &S3Service) -> Result<()> {
         app.is_loading_objects = false;
     }
     Ok(())
+}
+
+/// Fetch accurate restore status for Glacier/Deep Archive objects
+async fn refresh_glacier_restore_status(app: &mut App, s3: &S3Service, bucket: &str) {
+    use crate::models::StorageClassTier;
+
+    // Find all Glacier objects that need restore status
+    let glacier_keys: Vec<String> = app
+        .objects
+        .iter()
+        .filter(|obj| {
+            matches!(
+                obj.storage_class,
+                StorageClassTier::GlacierFlexibleRetrieval | StorageClassTier::GlacierDeepArchive
+            )
+        })
+        .map(|obj| obj.key.clone())
+        .collect();
+
+    if glacier_keys.is_empty() {
+        return;
+    }
+
+    // Batch fetch restore status using HeadObject (10 concurrent requests at a time)
+    let status_results = s3.batch_refresh_restore_status(bucket, &glacier_keys).await;
+
+    // Update objects with fetched restore status
+    for (key, restore_state) in status_results {
+        if let Some(obj) = app.objects.iter_mut().find(|o| o.key == key) {
+            obj.restore_state = restore_state;
+        }
+    }
+
+    // Re-apply mask if active to update filtered list
+    if app.active_mask.is_some() {
+        let mask = app.active_mask.clone();
+        app.apply_mask(mask);
+    }
 }
 
 fn move_selection(app: &mut App, delta: isize) {
@@ -941,31 +996,34 @@ fn draw_objects(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             let (restore_symbol, restore_style) = match &obj.restore_state {
                 Some(RestoreState::Available) => (
                     " Restored",
-                    Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::LightGreen)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Some(RestoreState::InProgress { .. }) => (
                     " Restoring",
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
                 ),
-                Some(RestoreState::Expired) => (
-                    " Expired",
-                    Style::default().fg(Color::Red)
-                ),
+                Some(RestoreState::Expired) => (" Expired", Style::default().fg(Color::Red)),
                 None => {
                     // Check if object is in Glacier and needs restore
                     if matches!(
                         obj.storage_class,
                         crate::models::StorageClassTier::GlacierFlexibleRetrieval
-                        | crate::models::StorageClassTier::GlacierDeepArchive
+                            | crate::models::StorageClassTier::GlacierDeepArchive
                     ) {
                         (
                             " NeedsRestore",
-                            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)
+                            Style::default()
+                                .fg(Color::Magenta)
+                                .add_modifier(Modifier::BOLD),
                         )
                     } else {
                         ("", Style::default().fg(Color::DarkGray))
                     }
-                },
+                }
             };
 
             let spans = vec![
@@ -1016,7 +1074,7 @@ fn draw_object_detail(frame: &mut ratatui::Frame, area: Rect, app: &App) {
                 if matches!(
                     obj.storage_class,
                     crate::models::StorageClassTier::GlacierFlexibleRetrieval
-                    | crate::models::StorageClassTier::GlacierDeepArchive
+                        | crate::models::StorageClassTier::GlacierDeepArchive
                 ) {
                     "NeedsRestore".to_string()
                 } else {
@@ -1157,15 +1215,18 @@ fn draw_mask_popup(frame: &mut ratatui::Frame, app: &App) {
 
     // Create pattern field with cursor
     let is_pattern_focused = matches!(app.mask_field, MaskEditorField::Pattern);
-    let mut pattern_spans = vec![
-        Span::styled("Pattern: ", label_style),
-    ];
+    let mut pattern_spans = vec![Span::styled("Pattern: ", label_style)];
 
     if is_pattern_focused {
         // Show cursor in pattern field
         let before_cursor = &app.mask_draft.pattern[..app.mask_draft.cursor_pos];
         let cursor_char = if app.mask_draft.cursor_pos < app.mask_draft.pattern.len() {
-            app.mask_draft.pattern.chars().nth(app.mask_draft.cursor_pos).unwrap().to_string()
+            app.mask_draft
+                .pattern
+                .chars()
+                .nth(app.mask_draft.cursor_pos)
+                .unwrap()
+                .to_string()
         } else {
             " ".to_string()
         };
@@ -1176,7 +1237,10 @@ fn draw_mask_popup(frame: &mut ratatui::Frame, app: &App) {
         };
 
         pattern_spans.push(Span::styled(before_cursor, active_style));
-        pattern_spans.push(Span::styled(cursor_char, Style::default().fg(Color::Black).bg(Color::LightYellow)));
+        pattern_spans.push(Span::styled(
+            cursor_char,
+            Style::default().fg(Color::Black).bg(Color::LightYellow),
+        ));
         pattern_spans.push(Span::styled(after_cursor, active_style));
     } else {
         let display = if app.mask_draft.pattern.is_empty() {
@@ -1198,11 +1262,19 @@ fn draw_mask_popup(frame: &mut ratatui::Frame, app: &App) {
         Line::from(vec![
             Span::styled(
                 "Match Mode: ",
-                if matches!(app.mask_field, MaskEditorField::Mode) { active_style } else { label_style }
+                if matches!(app.mask_field, MaskEditorField::Mode) {
+                    active_style
+                } else {
+                    label_style
+                },
             ),
             Span::styled(
                 app.mask_draft.kind.to_string(),
-                if matches!(app.mask_field, MaskEditorField::Mode) { active_style } else { inactive_style }
+                if matches!(app.mask_field, MaskEditorField::Mode) {
+                    active_style
+                } else {
+                    inactive_style
+                },
             ),
             Span::styled("  (use ←/→ or space)", hint_style),
         ]),
@@ -1210,22 +1282,49 @@ fn draw_mask_popup(frame: &mut ratatui::Frame, app: &App) {
         Line::from(vec![
             Span::styled(
                 "Case Sensitive: ",
-                if matches!(app.mask_field, MaskEditorField::Case) { active_style } else { label_style }
+                if matches!(app.mask_field, MaskEditorField::Case) {
+                    active_style
+                } else {
+                    label_style
+                },
             ),
             Span::styled(
-                if app.mask_draft.case_sensitive { "Yes" } else { "No" },
-                if matches!(app.mask_field, MaskEditorField::Case) { active_style } else { inactive_style }
+                if app.mask_draft.case_sensitive {
+                    "Yes"
+                } else {
+                    "No"
+                },
+                if matches!(app.mask_field, MaskEditorField::Case) {
+                    active_style
+                } else {
+                    inactive_style
+                },
             ),
             Span::styled("  (space or ←/→ toggles)", hint_style),
         ]),
         Line::from(""),
         Line::from(""),
         Line::from(vec![
-            Span::styled("Tab", Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Tab",
+                Style::default()
+                    .fg(Color::LightGreen)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" move between fields  ", hint_style),
-            Span::styled("Enter", Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Enter",
+                Style::default()
+                    .fg(Color::LightGreen)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" apply  ", hint_style),
-            Span::styled("Esc", Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Esc",
+                Style::default()
+                    .fg(Color::LightGreen)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" cancel", hint_style),
         ]),
     ];
@@ -1271,9 +1370,7 @@ fn draw_confirm_popup(frame: &mut ratatui::Frame, app: &App) {
 
     if let Some(action) = &app.pending_action {
         match action {
-            PendingAction::Transition {
-                target_class,
-            } => {
+            PendingAction::Transition { target_class } => {
                 lines.push(Line::from(vec![Span::styled(
                     "Transition Storage Class",
                     warn_style,
@@ -1351,9 +1448,7 @@ fn draw_help_popup(frame: &mut ratatui::Frame) {
 
     let lines = vec![
         Line::from(vec![Span::styled("BASIC WORKFLOW", header_style)]),
-        Line::from(
-            "1. Navigate with Tab/Shift+Tab to switch between panes (Buckets, Objects)",
-        ),
+        Line::from("1. Navigate with Tab/Shift+Tab to switch between panes (Buckets, Objects)"),
         Line::from("2. Select a bucket with arrows, press Enter to load its objects"),
         Line::from("3. Create a mask (press 'm') to filter objects by pattern"),
         Line::from("4. Transition objects to different storage classes or request restores"),
@@ -1448,9 +1543,7 @@ fn draw_credential_error_popup(frame: &mut ratatui::Frame) {
     let area = centered_rect(70, 50, frame.size());
     draw_modal_surface(frame, area);
 
-    let error_style = Style::default()
-        .fg(Color::Red)
-        .add_modifier(Modifier::BOLD);
+    let error_style = Style::default().fg(Color::Red).add_modifier(Modifier::BOLD);
     let title_style = Style::default()
         .fg(Color::LightYellow)
         .add_modifier(Modifier::BOLD);
