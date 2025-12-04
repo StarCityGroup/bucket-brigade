@@ -2,6 +2,12 @@
 
 Terminal UI for browsing S3 buckets, defining object masks, and managing storage tier transitions or restores without leaving the shell.
 
+## TODO
+
+1. **Progress bar for large batch operations**: Add visual progress indicators when processing many objects
+2. **Better handling of hangs on large batch operations**: Improve responsiveness and error handling for bulk operations on thousands of objects
+3. **Ensure masks apply to entire bucket**: Make sure mask operations work on all bucket objects, not just the lazy-loaded subset currently in memory
+
 ## Features
 
 - **Bucket & object browser**: list all accessible buckets and their objects, including size and current storage class.
