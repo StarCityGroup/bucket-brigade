@@ -9,10 +9,10 @@ use crossterm::terminal::{
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Gauge, List, ListItem, ListState, Paragraph, Wrap};
 
 use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
 use aws_sdk_s3::operation::restore_object::RestoreObjectError;
@@ -175,6 +175,10 @@ async fn handle_key_event(
         }
         AppMode::Confirming => {
             handle_confirmation_keys(key, app, s3, tracker).await?;
+            return Ok(false);
+        }
+        AppMode::ShowingProgress => {
+            // Ignore all key presses during progress operations
             return Ok(false);
         }
         AppMode::Browsing => {}
@@ -530,15 +534,59 @@ async fn execute_transition(
         app.push_status("No objects selected for transition");
         return Ok(());
     }
-    for key in keys {
+
+    // Initialize progress tracking
+    let total = keys.len();
+    app.progress = Some(crate::app::ProgressState::new(
+        format!("Transitioning to {}", target_class.label()),
+        total,
+    ));
+    app.set_mode(AppMode::ShowingProgress);
+
+    let mut success_count = 0;
+    let mut error_count = 0;
+
+    for (index, key) in keys.iter().enumerate() {
+        // Update progress
+        if let Some(progress) = &mut app.progress {
+            progress.update(index + 1, Some(key.clone()));
+        }
+
+        // Yield to allow UI updates
+        tokio::task::yield_now().await;
+
         match s3
-            .transition_storage_class(&bucket, &key, target_class.clone())
+            .transition_storage_class(&bucket, key, target_class.clone())
             .await
         {
-            Ok(_) => app.push_status(&format!("Transitioned {key} to {}", target_class.label())),
-            Err(err) => app.push_status(&format!("Transition failed for {key}: {err:#}")),
+            Ok(_) => {
+                success_count += 1;
+            }
+            Err(err) => {
+                error_count += 1;
+                app.push_status(&format!("Transition failed for {key}: {err:#}"));
+            }
         }
     }
+
+    // Clear progress and return to browsing
+    app.progress = None;
+    app.set_mode(AppMode::Browsing);
+
+    // Show summary
+    if error_count > 0 {
+        app.push_status(&format!(
+            "Transition complete: {} succeeded, {} failed",
+            success_count, error_count
+        ));
+    } else {
+        app.push_status(&format!(
+            "Successfully transitioned {} objects to {}",
+            success_count,
+            target_class.label()
+        ));
+    }
+
     load_objects_for_selection(app, s3).await?;
     Ok(())
 }
@@ -610,25 +658,57 @@ async fn execute_restore(
         return Ok(());
     }
 
-    app.push_status(&format!(
-        "Requesting restore for {} objects...",
-        keys_to_restore.len()
+    // Initialize progress tracking
+    let total = keys_to_restore.len();
+    app.progress = Some(crate::app::ProgressState::new(
+        "Requesting Glacier restore".to_string(),
+        total,
     ));
+    app.set_mode(AppMode::ShowingProgress);
 
     let mut restored_keys = Vec::new();
-    for key in keys_to_restore {
-        match s3.request_restore(&bucket, &key, days).await {
+    let mut success_count = 0;
+    let mut error_count = 0;
+
+    for (index, key) in keys_to_restore.iter().enumerate() {
+        // Update progress
+        if let Some(progress) = &mut app.progress {
+            progress.update(index + 1, Some(key.clone()));
+        }
+
+        // Yield to allow UI updates
+        tokio::task::yield_now().await;
+
+        match s3.request_restore(&bucket, key, days).await {
             Ok(_) => {
-                app.push_status(&format!("✓ Restore requested for {key}"));
+                success_count += 1;
                 // Track the restore request
                 tracker.add_request(bucket.clone(), key.clone(), days);
-                restored_keys.push(key);
+                restored_keys.push(key.clone());
             }
             Err(err) => {
+                error_count += 1;
                 let detail = describe_restore_error(&err);
                 app.push_status(&format!("✗ Restore failed for {key}: {detail}"));
             }
         }
+    }
+
+    // Clear progress and return to browsing
+    app.progress = None;
+    app.set_mode(AppMode::Browsing);
+
+    // Show summary
+    if error_count > 0 {
+        app.push_status(&format!(
+            "Restore requests complete: {} succeeded, {} failed",
+            success_count, error_count
+        ));
+    } else {
+        app.push_status(&format!(
+            "Successfully requested restore for {} objects",
+            success_count
+        ));
     }
 
     // Manually update restore status for successfully restored objects
@@ -945,6 +1025,7 @@ fn draw(frame: &mut ratatui::Frame, app: &App, tracker: &RestoreTracker) {
         AppMode::ShowingHelp => draw_help_popup(frame),
         AppMode::ViewingLog => draw_log_popup(frame, app),
         AppMode::ViewingRestoreRequests => draw_tracked_requests_popup(frame, tracker),
+        AppMode::ShowingProgress => draw_progress_popup(frame, app),
         AppMode::Browsing => {}
     }
 }
@@ -1668,7 +1749,9 @@ fn draw_tracked_requests_popup(frame: &mut ratatui::Frame, tracker: &RestoreTrac
         lines.push(Line::from(""));
         lines.push(Line::from("No restore requests tracked yet."));
         lines.push(Line::from(""));
-        lines.push(Line::from("Restore requests will appear here after you initiate them."));
+        lines.push(Line::from(
+            "Restore requests will appear here after you initiate them.",
+        ));
     } else {
         for req in requests {
             let status_text = match &req.current_status {
@@ -1700,6 +1783,71 @@ fn draw_tracked_requests_popup(frame: &mut ratatui::Frame, tracker: &RestoreTrac
 
     let para = Paragraph::new(lines).block(block).wrap(Wrap { trim: true });
     frame.render_widget(para, area);
+}
+
+fn draw_progress_popup(frame: &mut ratatui::Frame, app: &App) {
+    let area = centered_rect(70, 30, frame.size());
+    draw_modal_surface(frame, area);
+
+    let progress = match &app.progress {
+        Some(p) => p,
+        None => return,
+    };
+
+    let title_style = Style::default()
+        .fg(Color::LightCyan)
+        .add_modifier(Modifier::BOLD);
+
+    let block = Block::default()
+        .title(Span::styled(
+            format!(" {} ", progress.operation),
+            title_style,
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .style(Style::default().bg(Color::Black));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    // Split into sections
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // Progress bar
+            Constraint::Length(2), // Counter
+            Constraint::Length(2), // Current item
+            Constraint::Min(1),    // Padding
+        ])
+        .split(inner);
+
+    // Progress bar
+    let gauge = Gauge::default()
+        .gauge_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .bg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        )
+        .percent(progress.percentage());
+    frame.render_widget(gauge, chunks[0]);
+
+    // Counter text
+    let counter_text = format!("{} / {} objects", progress.current, progress.total);
+    let counter = Paragraph::new(counter_text)
+        .style(Style::default().fg(Color::White))
+        .alignment(Alignment::Center);
+    frame.render_widget(counter, chunks[1]);
+
+    // Current item
+    if let Some(ref item) = progress.current_item {
+        let item_text = format!("Processing: {}", item);
+        let item_para = Paragraph::new(item_text)
+            .style(Style::default().fg(Color::Gray))
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true });
+        frame.render_widget(item_para, chunks[2]);
+    }
 }
 
 fn draw_credential_error_popup(frame: &mut ratatui::Frame) {

@@ -67,13 +67,22 @@ impl StorageClassTier {
         vec![
             ("Any", None),
             ("STANDARD", Some(StorageClassTier::Standard)),
-            ("INTELLIGENT_TIERING", Some(StorageClassTier::IntelligentTiering)),
+            (
+                "INTELLIGENT_TIERING",
+                Some(StorageClassTier::IntelligentTiering),
+            ),
             ("STANDARD_IA", Some(StorageClassTier::StandardIa)),
             ("ONEZONE_IA", Some(StorageClassTier::OneZoneIa)),
-            ("GLACIER_IR", Some(StorageClassTier::GlacierInstantRetrieval)),
+            (
+                "GLACIER_IR",
+                Some(StorageClassTier::GlacierInstantRetrieval),
+            ),
             ("GLACIER", Some(StorageClassTier::GlacierFlexibleRetrieval)),
             ("DEEP_ARCHIVE", Some(StorageClassTier::GlacierDeepArchive)),
-            ("REDUCED_REDUNDANCY", Some(StorageClassTier::ReducedRedundancy)),
+            (
+                "REDUCED_REDUNDANCY",
+                Some(StorageClassTier::ReducedRedundancy),
+            ),
         ]
     }
 

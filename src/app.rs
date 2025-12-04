@@ -22,6 +22,7 @@ pub enum AppMode {
     ViewingLog,
     ViewingRestoreRequests,
     CredentialError,
+    ShowingProgress,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,6 +86,37 @@ pub enum PendingAction {
     Restore { days: i32 },
 }
 
+#[derive(Clone, Debug)]
+pub struct ProgressState {
+    pub operation: String,
+    pub current: usize,
+    pub total: usize,
+    pub current_item: Option<String>,
+}
+
+impl ProgressState {
+    pub fn new(operation: String, total: usize) -> Self {
+        Self {
+            operation,
+            current: 0,
+            total,
+            current_item: None,
+        }
+    }
+
+    pub fn update(&mut self, current: usize, item: Option<String>) {
+        self.current = current;
+        self.current_item = item;
+    }
+
+    pub fn percentage(&self) -> u16 {
+        if self.total == 0 {
+            return 0;
+        }
+        ((self.current as f64 / self.total as f64) * 100.0) as u16
+    }
+}
+
 pub struct App {
     pub buckets: Vec<BucketInfo>,
     pub all_buckets: Vec<BucketInfo>,
@@ -109,6 +141,8 @@ pub struct App {
     pub total_object_count: Option<usize>,
     pub continuation_token: Option<String>,
     pub is_loading_objects: bool,
+    // Progress tracking
+    pub progress: Option<ProgressState>,
 }
 
 impl App {
@@ -154,6 +188,7 @@ impl App {
             total_object_count: None,
             continuation_token: None,
             is_loading_objects: false,
+            progress: None,
         }
     }
 

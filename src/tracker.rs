@@ -43,6 +43,8 @@ impl RestoreTracker {
         let _ = self.save();
     }
 
+    /// Update the status of a tracked restore request
+    #[allow(dead_code)]
     pub fn update_status(&mut self, bucket: &str, key: &str, status: RestoreState) {
         if let Some(req) = self
             .requests
@@ -59,10 +61,17 @@ impl RestoreTracker {
         let _ = self.save();
     }
 
+    /// Get only active (in-progress) restore requests
+    #[allow(dead_code)]
     pub fn get_active_requests(&self) -> Vec<TrackedRestoreRequest> {
         self.requests
             .iter()
-            .filter(|r| !matches!(r.current_status, RestoreState::Available | RestoreState::Expired))
+            .filter(|r| {
+                !matches!(
+                    r.current_status,
+                    RestoreState::Available | RestoreState::Expired
+                )
+            })
             .cloned()
             .collect()
     }
@@ -71,9 +80,14 @@ impl RestoreTracker {
         &self.requests
     }
 
+    /// Remove completed or expired restore requests from tracking
+    #[allow(dead_code)]
     pub fn remove_completed(&mut self) {
         self.requests.retain(|r| {
-            !matches!(r.current_status, RestoreState::Available | RestoreState::Expired)
+            !matches!(
+                r.current_status,
+                RestoreState::Available | RestoreState::Expired
+            )
         });
         let _ = self.save();
     }
